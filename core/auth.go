@@ -17,15 +17,25 @@ import (
 	"github.com/anyproto/anytype-cli/core/output"
 )
 
+func determineNetworkMode(networkConfigPath string) pb.RpcAccountNetworkMode {
+	if networkConfigPath != "" {
+		return pb.RpcAccount_CustomConfig
+	}
+	return pb.RpcAccount_DefaultConfig
+}
+
 // Authenticate performs the full authentication flow for a bot account using an account key.
 // This includes wallet recovery, session creation, account recovery, account selection, and config persistence.
-func Authenticate(accountKey, rootPath, apiAddr string) error {
+// If networkConfigPath is provided, connects to that custom network.
+func Authenticate(accountKey, rootPath, apiAddr, networkConfigPath string) error {
 	if rootPath == "" {
 		rootPath = config.GetDataDir()
 	}
 	if apiAddr == "" {
 		apiAddr = config.DefaultAPIAddress
 	}
+
+	networkMode := determineNetworkMode(networkConfigPath)
 
 	var sessionToken string
 	err := GRPCCallNoAuth(func(ctx context.Context, client service.ClientCommandsClient) error {
@@ -104,9 +114,11 @@ func Authenticate(accountKey, rootPath, apiAddr string) error {
 	var techSpaceId string
 	err = GRPCCall(func(ctx context.Context, client service.ClientCommandsClient) error {
 		resp, err := client.AccountSelect(ctx, &pb.RpcAccountSelectRequest{
-			Id:                accountId,
-			JsonApiListenAddr: apiAddr,
-			RootPath:          rootPath,
+			Id:                          accountId,
+			JsonApiListenAddr:           apiAddr,
+			RootPath:                    rootPath,
+			NetworkMode:                 networkMode,
+			NetworkCustomConfigFilePath: networkConfigPath,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to select account: %w", err)
@@ -157,7 +169,7 @@ func ValidateAccountKey(accountKey string) error {
 
 // Login handles user interaction for login by prompting for account key if not provided,
 // validating it, performing authentication, and saving the key to keychain.
-func Login(accountKey, rootPath, apiAddr string) error {
+func Login(accountKey, rootPath, apiAddr, networkConfigPath string) error {
 	if accountKey == "" {
 		output.Print("Enter account key: ")
 		reader := bufio.NewReader(os.Stdin)
@@ -169,8 +181,14 @@ func Login(accountKey, rootPath, apiAddr string) error {
 		return err
 	}
 
-	if err := Authenticate(accountKey, rootPath, apiAddr); err != nil {
+	if err := Authenticate(accountKey, rootPath, apiAddr, networkConfigPath); err != nil {
 		return err
+	}
+
+	if networkConfigPath != "" {
+		if err := config.SetNetworkConfigPathToConfig(networkConfigPath); err != nil {
+			output.Warning("Failed to save network config path: %v", err)
+		}
 	}
 
 	savedToKeyring, err := SaveAccountKey(accountKey)
@@ -242,13 +260,16 @@ func Logout() error {
 
 // CreateWallet creates a new wallet and account, establishes a session,
 // saves credentials, and returns the account key, account ID, and whether credentials were saved to keyring.
-func CreateWallet(name, rootPath, apiAddr string) (string, string, bool, error) {
+// If networkConfigPath is provided, the account will be created on that custom network.
+func CreateWallet(name, rootPath, apiAddr, networkConfigPath string) (string, string, bool, error) {
 	if rootPath == "" {
 		rootPath = config.GetDataDir()
 	}
 	if apiAddr == "" {
 		apiAddr = config.DefaultAPIAddress
 	}
+
+	networkMode := determineNetworkMode(networkConfigPath)
 
 	var sessionToken string
 	var accountKey string
@@ -304,9 +325,11 @@ func CreateWallet(name, rootPath, apiAddr string) (string, string, bool, error) 
 	var accountId string
 	err = GRPCCall(func(ctx context.Context, client service.ClientCommandsClient) error {
 		resp, err := client.AccountCreate(ctx, &pb.RpcAccountCreateRequest{
-			Name:              name,
-			StorePath:         rootPath,
-			JsonApiListenAddr: apiAddr,
+			Name:                        name,
+			StorePath:                   rootPath,
+			JsonApiListenAddr:           apiAddr,
+			NetworkMode:                 networkMode,
+			NetworkCustomConfigFilePath: networkConfigPath,
 		})
 		if err != nil {
 			return fmt.Errorf("account creation failed: %w", err)
@@ -321,9 +344,11 @@ func CreateWallet(name, rootPath, apiAddr string) (string, string, bool, error) 
 	var techSpaceId string
 	err = GRPCCall(func(ctx context.Context, client service.ClientCommandsClient) error {
 		resp, err := client.AccountSelect(ctx, &pb.RpcAccountSelectRequest{
-			Id:                accountId,
-			JsonApiListenAddr: apiAddr,
-			RootPath:          rootPath,
+			Id:                          accountId,
+			JsonApiListenAddr:           apiAddr,
+			RootPath:                    rootPath,
+			NetworkMode:                 networkMode,
+			NetworkCustomConfigFilePath: networkConfigPath,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to select account: %w", err)
@@ -348,6 +373,11 @@ func CreateWallet(name, rootPath, apiAddr string) (string, string, bool, error) 
 	if techSpaceId != "" {
 		if err := config.SetTechSpaceIdToConfig(techSpaceId); err != nil {
 			output.Warning("Failed to save tech space Id: %v", err)
+		}
+	}
+	if networkConfigPath != "" {
+		if err := config.SetNetworkConfigPathToConfig(networkConfigPath); err != nil {
+			output.Warning("Failed to save network config path: %v", err)
 		}
 	}
 

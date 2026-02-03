@@ -1,6 +1,7 @@
 package join
 
 import (
+	"fmt"
 	"net/url"
 	"strings"
 
@@ -22,43 +23,43 @@ func NewJoinCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "join <invite-link>",
 		Short: "Join a space",
-		Long:  "Join a space using an invite link (https://invite.any.coop/...)",
+		Long:  "Join a space using an invite link (https://<host>/<cid>#<key> or anytype://invite/?cid=<cid>&key=<key>)",
 		Args:  cmdutil.ExactArgs(1, "cannot join space: invite-link argument required"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			input := args[0]
 			var spaceId string
 
 			if networkId == "" {
-				networkId = config.AnytypeNetworkAddress
+				networkId = resolveNetworkId()
 			}
 
-			if strings.HasPrefix(input, "https://invite.any.coop/") {
-				u, err := url.Parse(input)
+			if inviteCid == "" || inviteFileKey == "" {
+				parsedCid, parsedKey, err := parseInviteLink(input)
 				if err != nil {
-					return output.Error("invalid invite link: %w", err)
+					return output.Error("Invalid invite link: %w", err)
 				}
-
-				path := strings.TrimPrefix(u.Path, "/")
-				if path == "" {
-					return output.Error("invite link missing Cid")
+				if inviteCid == "" {
+					inviteCid = parsedCid
 				}
-				inviteCid = path
-
-				inviteFileKey = u.Fragment
 				if inviteFileKey == "" {
-					return output.Error("invite link missing key (should be after #)")
+					inviteFileKey = parsedKey
 				}
-
-				info, err := core.ViewSpaceInvite(inviteCid, inviteFileKey)
-				if err != nil {
-					return output.Error("Failed to view invite: %w", err)
-				}
-
-				output.Info("Joining space '%s' created by %s...", info.SpaceName, info.CreatorName)
-				spaceId = info.SpaceId
-			} else {
-				return output.Error("invalid invite link format, expected: https://invite.any.coop/{cid}#{key}")
 			}
+
+			if inviteCid == "" {
+				return output.Error("Invite link missing cid")
+			}
+			if inviteFileKey == "" {
+				return output.Error("Invite link missing key")
+			}
+
+			info, err := core.ViewSpaceInvite(inviteCid, inviteFileKey)
+			if err != nil {
+				return output.Error("Failed to view invite: %w", err)
+			}
+
+			output.Info("Joining space '%s' created by %s...", info.SpaceName, info.CreatorName)
+			spaceId = info.SpaceId
 
 			if err := core.JoinSpace(networkId, spaceId, inviteCid, inviteFileKey); err != nil {
 				return output.Error("Failed to join space: %w", err)
@@ -74,4 +75,69 @@ func NewJoinCmd() *cobra.Command {
 	cmd.Flags().StringVar(&inviteFileKey, "invite-key", "", "Invite file `key` (extracted from invite link if not provided)")
 
 	return cmd
+}
+
+// resolveNetworkId returns the network ID using this fallback chain:
+// cached config → YAML file → default Anytype network.
+func resolveNetworkId() string {
+	if cachedId, err := config.GetNetworkIdFromConfig(); err == nil && cachedId != "" {
+		return cachedId
+	}
+
+	if yamlPath, _ := config.GetNetworkConfigPathFromConfig(); yamlPath != "" {
+		if id, err := config.ReadNetworkIdFromYAML(yamlPath); err == nil && id != "" {
+			_ = config.SetNetworkIdToConfig(id)
+			return id
+		}
+	}
+
+	return config.AnytypeNetworkAddress
+}
+
+// parseInviteLink parses web invites (https://<host>/<cid>#<key>) and
+// app deep links (anytype://invite/?cid=<cid>&key=<key>).
+func parseInviteLink(input string) (cid string, key string, err error) {
+	u, err := url.Parse(input)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to parse URL: %w", err)
+	}
+
+	switch u.Scheme {
+	case "https", "http":
+		if u.Host == "" {
+			return "", "", fmt.Errorf("invite link missing host")
+		}
+		path := strings.Trim(u.Path, "/")
+		if path == "" {
+			return "", "", fmt.Errorf("invite link missing cid in path")
+		}
+		parts := strings.Split(path, "/")
+		cid = parts[len(parts)-1]
+		if cid == "" {
+			return "", "", fmt.Errorf("invite link missing cid in path")
+		}
+		key = u.Fragment
+		if key == "" {
+			return "", "", fmt.Errorf("invite link missing key (should be after #)")
+		}
+		return cid, key, nil
+
+	case "anytype":
+		if !strings.HasPrefix(u.Path, "/invite") && u.Host != "invite" {
+			return "", "", fmt.Errorf("unsupported anytype:// path (expected anytype://invite/...)")
+		}
+		query := u.Query()
+		cid = query.Get("cid")
+		key = query.Get("key")
+		if cid == "" {
+			return "", "", fmt.Errorf("invite link missing cid parameter")
+		}
+		if key == "" {
+			return "", "", fmt.Errorf("invite link missing key parameter")
+		}
+		return cid, key, nil
+
+	default:
+		return "", "", fmt.Errorf("unsupported scheme %q (expected http, https, or anytype)", u.Scheme)
+	}
 }

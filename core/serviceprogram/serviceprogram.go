@@ -138,11 +138,13 @@ func (p *Program) attemptAutoLogin() {
 		return
 	}
 
+	networkConfigPath, _ := config.GetNetworkConfigPathFromConfig()
+
 	output.Info("Found stored account key, attempting auto-login...")
 
 	maxRetries := 3
 	for i := 0; i < maxRetries; i++ {
-		if err := core.Authenticate(accountKey, "", p.apiListenAddr); err != nil {
+		if err := core.Authenticate(accountKey, "", p.apiListenAddr, networkConfigPath); err != nil {
 			if i < maxRetries-1 {
 				time.Sleep(2 * time.Second)
 				continue

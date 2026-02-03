@@ -16,16 +16,17 @@ import (
 func NewCreateCmd() *cobra.Command {
 	var rootPath string
 	var listenAddress string
+	var networkConfigPath string
 
 	cmd := &cobra.Command{
 		Use:   "create <name>",
 		Short: "Create a new bot account",
-		Long:  "Create a new Anytype bot account with a generated account key. The account key is your credential for bot authentication.",
+		Long:  "Create a new Anytype bot account with a generated account key. The account key is your credential for bot authentication. Use --network-config for self-hosted networks.",
 		Args:  cmdutil.ExactArgs(1, "cannot create account: name argument required"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 
-			accountKey, accountId, savedToKeyring, err := core.CreateWallet(name, rootPath, listenAddress)
+			accountKey, accountId, savedToKeyring, err := core.CreateWallet(name, rootPath, listenAddress, networkConfigPath)
 			if err != nil {
 				return output.Error("Failed to create account: %w", err)
 			}
@@ -76,6 +77,7 @@ func NewCreateCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&rootPath, "root-path", "", "Root path for account data")
 	cmd.Flags().StringVar(&listenAddress, "listen-address", config.DefaultAPIAddress, "API listen address in `host:port` format")
+	cmd.Flags().StringVar(&networkConfigPath, "network-config", "", "Path to custom network configuration YAML (for self-hosted)")
 
 	return cmd
 }

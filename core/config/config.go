@@ -9,8 +9,10 @@ import (
 )
 
 type Config struct {
-	AccountId   string `json:"accountId,omitempty"`
-	TechSpaceId string `json:"techSpaceId,omitempty"`
+	AccountId         string `json:"accountId,omitempty"`
+	TechSpaceId       string `json:"techSpaceId,omitempty"`
+	NetworkConfigPath string `json:"networkConfigPath,omitempty"`
+	NetworkId         string `json:"networkId,omitempty"`
 	// Credentials stored in plain text - only used when keyring is unavailable
 	// WARNING: This is insecure and should only be used on headless servers
 	AccountKey   string `json:"accountKey,omitempty"`
@@ -129,6 +131,22 @@ func (cm *ConfigManager) SetSessionToken(token string) error {
 func (cm *ConfigManager) SetAccountKey(accountKey string) error {
 	cm.mu.Lock()
 	cm.config.AccountKey = accountKey
+	cm.mu.Unlock()
+
+	return cm.Save()
+}
+
+func (cm *ConfigManager) SetNetworkConfigPath(path string) error {
+	cm.mu.Lock()
+	cm.config.NetworkConfigPath = path
+	cm.mu.Unlock()
+
+	return cm.Save()
+}
+
+func (cm *ConfigManager) SetNetworkId(networkId string) error {
+	cm.mu.Lock()
+	cm.config.NetworkId = networkId
 	cm.mu.Unlock()
 
 	return cm.Save()

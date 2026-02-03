@@ -2,6 +2,9 @@ package config
 
 import (
 	"fmt"
+	"os"
+
+	"gopkg.in/yaml.v3"
 )
 
 func GetAccountIdFromConfig() (string, error) {
@@ -100,4 +103,62 @@ func SetAccountKeyToConfig(accountKey string) error {
 	}
 
 	return configMgr.SetAccountKey(accountKey)
+}
+
+func GetNetworkConfigPathFromConfig() (string, error) {
+	configMgr := GetConfigManager()
+	if err := configMgr.Load(); err != nil {
+		return "", fmt.Errorf("failed to load config: %w", err)
+	}
+
+	cfg := configMgr.Get()
+	return cfg.NetworkConfigPath, nil
+}
+
+func SetNetworkConfigPathToConfig(path string) error {
+	configMgr := GetConfigManager()
+	if err := configMgr.Load(); err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	return configMgr.SetNetworkConfigPath(path)
+}
+
+func GetNetworkIdFromConfig() (string, error) {
+	configMgr := GetConfigManager()
+	if err := configMgr.Load(); err != nil {
+		return "", fmt.Errorf("failed to load config: %w", err)
+	}
+
+	cfg := configMgr.Get()
+	if cfg.NetworkId == "" {
+		return "", fmt.Errorf("no network Id found in config")
+	}
+
+	return cfg.NetworkId, nil
+}
+
+func SetNetworkIdToConfig(networkId string) error {
+	configMgr := GetConfigManager()
+	if err := configMgr.Load(); err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	return configMgr.SetNetworkId(networkId)
+}
+
+func ReadNetworkIdFromYAML(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read network config: %w", err)
+	}
+
+	var cfg struct {
+		NetworkId string `yaml:"networkId"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return "", fmt.Errorf("failed to parse network config: %w", err)
+	}
+
+	return cfg.NetworkId, nil
 }
