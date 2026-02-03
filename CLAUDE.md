@@ -38,7 +38,7 @@ make build-windows-amd64
 - **CGO**: The build requires CGO_ENABLED=1 due to tantivy (full-text search library) dependencies
 - **Tantivy Library**: Automatically downloaded for your platform during `make build`
 - **C Compiler**: Required for CGO and linking tantivy library (clang on macOS, gcc on Linux, mingw on Windows)
-- **Go 1.20+**: Required for building the project
+- **Go 1.24+**: Required for building the project
 
 ## Development Workflow
 
@@ -128,9 +128,9 @@ The CLI embeds the anytype-heart gRPC server directly, creating a self-contained
 2. **Cross-Platform Service**: Works on Windows (User Service), macOS (User Agent/launchd), Linux (systemd user service)
 3. **Keyring Integration**: Authentication tokens are stored securely in the system keyring
 4. **Port Configuration**:
-   - gRPC: localhost:31007
-   - gRPC-Web: localhost:31008
-   - API: localhost:31009
+   - gRPC: localhost:31010
+   - gRPC-Web: localhost:31011
+   - API: localhost:31012
 5. **Event Streaming**: Uses server-sent events for real-time updates with message batching
 6. **Version Management**: Version info is injected at build time via ldflags
 7. **Self-Updating**: The CLI can update itself using the `anytype update` command
