@@ -17,7 +17,7 @@ GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
 OUTPUT ?= dist/anytype
 
-TANTIVY_VERSION := v1.0.4
+TANTIVY_VERSION := v1.0.6
 TANTIVY_LIB_PATH ?= dist/tantivy
 CGO_LDFLAGS := -L$(TANTIVY_LIB_PATH)
 
