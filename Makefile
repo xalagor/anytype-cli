@@ -19,6 +19,7 @@ OUTPUT ?= dist/anytype
 
 TANTIVY_VERSION := $(shell cat go.mod | grep github.com/anyproto/tantivy-go | cut -d' ' -f2)
 TANTIVY_LIB_PATH ?= dist/tantivy
+TANTIVY_MARKER = $(TANTIVY_LIB_PATH)/.version-$(TANTIVY_VERSION)
 CGO_LDFLAGS := -L$(TANTIVY_LIB_PATH)
 
 GOLANGCI_LINT_VERSION := v2.7.2
@@ -54,43 +55,43 @@ build-linux-amd64:
 build-linux-arm64:
 	@GOOS=linux GOARCH=arm64 TANTIVY_LIB_PATH=dist/tantivy-linux-arm64 BUILD_TAGS=noheic CC=aarch64-linux-musl-gcc EXTRA_LDFLAGS="-linkmode external -extldflags '-static'" OUTPUT=dist/anytype-linux-arm64 $(MAKE) build
 
-download-tantivy: ## Download tantivy library for current platform
-	@if [ ! -f "$(TANTIVY_LIB_PATH)/libtantivy_go.a" ]; then \
-		echo "Downloading tantivy library $(TANTIVY_VERSION) for $(GOOS)/$(GOARCH)..."; \
-		mkdir -p $(TANTIVY_LIB_PATH); \
-		if [ "$(GOOS)" = "darwin" ]; then \
-			if [ "$(GOARCH)" = "amd64" ]; then \
-				curl -L "https://github.com/anyproto/tantivy-go/releases/download/$(TANTIVY_VERSION)/darwin-amd64.tar.gz" | tar xz -C $(TANTIVY_LIB_PATH); \
-			elif [ "$(GOARCH)" = "arm64" ]; then \
-				curl -L "https://github.com/anyproto/tantivy-go/releases/download/$(TANTIVY_VERSION)/darwin-arm64.tar.gz" | tar xz -C $(TANTIVY_LIB_PATH); \
-			else \
-				echo "Unsupported architecture: $(GOARCH) for macOS"; \
-				exit 1; \
-			fi; \
-		elif [ "$(GOOS)" = "linux" ]; then \
-			if [ "$(GOARCH)" = "amd64" ]; then \
-				curl -L "https://github.com/anyproto/tantivy-go/releases/download/$(TANTIVY_VERSION)/linux-amd64-musl.tar.gz" | tar xz -C $(TANTIVY_LIB_PATH); \
-			elif [ "$(GOARCH)" = "arm64" ]; then \
-				curl -L "https://github.com/anyproto/tantivy-go/releases/download/$(TANTIVY_VERSION)/linux-arm64-musl.tar.gz" | tar xz -C $(TANTIVY_LIB_PATH); \
-			else \
-				echo "Unsupported architecture: $(GOARCH) for Linux"; \
-				exit 1; \
-			fi; \
-		elif [ "$(GOOS)" = "windows" ]; then \
-			if [ "$(GOARCH)" = "amd64" ]; then \
-				curl -L "https://github.com/anyproto/tantivy-go/releases/download/$(TANTIVY_VERSION)/windows-amd64.tar.gz" | tar xz -C $(TANTIVY_LIB_PATH); \
-			else \
-				echo "Unsupported architecture: $(GOARCH) for Windows"; \
-				exit 1; \
-			fi; \
+download-tantivy: $(TANTIVY_MARKER) ## Download tantivy library for current platform
+
+$(TANTIVY_MARKER):
+	@rm -rf $(TANTIVY_LIB_PATH)
+	@mkdir -p $(TANTIVY_LIB_PATH)
+	@echo "Downloading tantivy library $(TANTIVY_VERSION) for $(GOOS)/$(GOARCH)..."
+	@if [ "$(GOOS)" = "darwin" ]; then \
+		if [ "$(GOARCH)" = "amd64" ]; then \
+			curl -L "https://github.com/anyproto/tantivy-go/releases/download/$(TANTIVY_VERSION)/darwin-amd64.tar.gz" | tar xz -C $(TANTIVY_LIB_PATH); \
+		elif [ "$(GOARCH)" = "arm64" ]; then \
+			curl -L "https://github.com/anyproto/tantivy-go/releases/download/$(TANTIVY_VERSION)/darwin-arm64.tar.gz" | tar xz -C $(TANTIVY_LIB_PATH); \
 		else \
-			echo "Unsupported OS: $(GOOS)"; \
+			echo "Unsupported architecture: $(GOARCH) for macOS"; \
 			exit 1; \
 		fi; \
-		echo "Tantivy library downloaded successfully"; \
+	elif [ "$(GOOS)" = "linux" ]; then \
+		if [ "$(GOARCH)" = "amd64" ]; then \
+			curl -L "https://github.com/anyproto/tantivy-go/releases/download/$(TANTIVY_VERSION)/linux-amd64-musl.tar.gz" | tar xz -C $(TANTIVY_LIB_PATH); \
+		elif [ "$(GOARCH)" = "arm64" ]; then \
+			curl -L "https://github.com/anyproto/tantivy-go/releases/download/$(TANTIVY_VERSION)/linux-arm64-musl.tar.gz" | tar xz -C $(TANTIVY_LIB_PATH); \
+		else \
+			echo "Unsupported architecture: $(GOARCH) for Linux"; \
+			exit 1; \
+		fi; \
+	elif [ "$(GOOS)" = "windows" ]; then \
+		if [ "$(GOARCH)" = "amd64" ]; then \
+			curl -L "https://github.com/anyproto/tantivy-go/releases/download/$(TANTIVY_VERSION)/windows-amd64.tar.gz" | tar xz -C $(TANTIVY_LIB_PATH); \
+		else \
+			echo "Unsupported architecture: $(GOARCH) for Windows"; \
+			exit 1; \
+		fi; \
 	else \
-		echo "Tantivy library already exists"; \
+		echo "Unsupported OS: $(GOOS)"; \
+		exit 1; \
 	fi
+	@touch $@
+	@echo "Tantivy library $(TANTIVY_VERSION) downloaded successfully"
 
 ##@ Installation
 
