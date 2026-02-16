@@ -3,8 +3,8 @@ module github.com/anyproto/anytype-cli
 go 1.24.6
 
 require (
-	github.com/anyproto/any-sync v0.11.10
-	github.com/anyproto/anytype-heart v0.48.0
+	github.com/anyproto/any-sync v0.11.14
+	github.com/anyproto/anytype-heart v0.48.1
 	github.com/cheggaaa/mb/v3 v3.0.2
 	github.com/chzyer/readline v1.5.1
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0
@@ -14,6 +14,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/zalando/go-keyring v0.2.6
 	google.golang.org/grpc v1.78.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -256,7 +257,6 @@ require (
 	gopkg.in/Graylog2/go-gelf.v2 v2.0.0-20191017102106-1550ee647df0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 	modernc.org/libc v1.66.8 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
