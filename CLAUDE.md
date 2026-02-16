@@ -61,7 +61,7 @@ make build-windows-amd64
    ```bash
    go fmt ./...
    go vet ./...
-   make lint  # Uses golangci-lint v2.2.1
+   make lint
    ```
 
 4. **Testing**:
@@ -114,13 +114,13 @@ The CLI embeds the anytype-heart gRPC server directly, creating a self-contained
 
 ## Key Dependencies
 
-- `github.com/anyproto/anytype-heart v0.42.3`: The embedded middleware server (provides all Anytype functionality)
-- `github.com/spf13/cobra v1.9.1`: CLI framework for command structure
-- `google.golang.org/grpc v1.74.2`: gRPC client-server communication
-- `github.com/zalando/go-keyring v0.2.6`: Secure credential storage in system keyring
-- `github.com/cheggaaa/mb/v3 v3.0.2`: Message batching queue for event handling
-- `github.com/kardianos/service v1.2.4`: Cross-platform user service management
-- `github.com/anyproto/tantivy-go v1.0.4`: Full-text search capabilities (requires CGO)
+- `github.com/anyproto/anytype-heart`: The embedded middleware server (provides all Anytype functionality)
+- `github.com/spf13/cobra`: CLI framework for command structure
+- `google.golang.org/grpc`: gRPC client-server communication
+- `github.com/zalando/go-keyring`: Secure credential storage in system keyring
+- `github.com/cheggaaa/mb/v3`: Message batching queue for event handling
+- `github.com/kardianos/service`: Cross-platform user service management
+- `github.com/anyproto/tantivy-go`: Full-text search capabilities (requires CGO)
 
 ## Important Notes
 
