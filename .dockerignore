@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+.github
+
+# Build artifacts
+dist/
+*.tar.gz
+*.zip
+
+# Documentation
+*.md
+CLAUDE.md
+LICENSE
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Go test cache
+*.test
+*.out
+coverage.txt
+
+# Dependencies (will be downloaded during build)
+vendor/
+
+# CI/CD
+.github/
