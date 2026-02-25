@@ -37,7 +37,7 @@ func GetVersionBrief() string {
 func GetVersion() string {
 	version := Version
 	if version == "" {
-		version = "dev"
+		version = "0.0.1-dev"
 	}
 	if GitState == "dirty" {
 		version += "-dirty"
