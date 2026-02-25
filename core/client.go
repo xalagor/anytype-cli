@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/anyproto/anytype-heart/pb/service"
+	pb "github.com/anyproto/anytype-heart/pb"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -78,6 +80,11 @@ func GRPCCall(fn func(ctx context.Context, client service.ClientCommandsClient) 
 	ctx, cancel := ClientContextWithAuthTimeout(token, defaultTimeout)
 	defer cancel()
 
+	err = ensureInitialParameters(ctx, client)
+	if err != nil {
+		return err
+	}
+
 	err = fn(ctx, client)
 	if err != nil {
 		if s, ok := status.FromError(err); ok && s.Code() == codes.Unavailable {
@@ -98,12 +105,28 @@ func GRPCCallNoAuth(fn func(ctx context.Context, client service.ClientCommandsCl
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancel()
 
+	err = ensureInitialParameters(ctx, client)
+	if err != nil {
+		return err
+	}
+
 	err = fn(ctx, client)
 	if err != nil {
 		if s, ok := status.FromError(err); ok && s.Code() == codes.Unavailable {
 			return fmt.Errorf("anytype is not running. Start it with: anytype serve")
 		}
 		return err
+	}
+	return nil
+}
+func ensureInitialParameters(ctx context.Context, client service.ClientCommandsClient) error {
+	_, err := client.InitialSetParameters(ctx, &pb.RpcInitialSetParametersRequest{
+		Platform: runtime.GOOS,
+		Version:  GetVersion(),
+		Workdir:  config.GetWorkDir(),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to set initial parameters: %w", err)
 	}
 	return nil
 }

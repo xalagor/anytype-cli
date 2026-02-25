@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"runtime"
 	"strings"
 
 	"github.com/anyproto/anytype-heart/pb"
@@ -39,17 +38,7 @@ func Authenticate(accountKey, rootPath, apiAddr, networkConfigPath string) error
 
 	var sessionToken string
 	err := GRPCCallNoAuth(func(ctx context.Context, client service.ClientCommandsClient) error {
-		resp, err := client.InitialSetParameters(ctx, &pb.RpcInitialSetParametersRequest{
-			Platform: runtime.GOOS,
-			Version:  Version,
-			Workdir:  config.GetWorkDir(),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to set initial parameters: %w", err)
-		}
-		if resp.Error.Code != pb.RpcInitialSetParametersResponseError_NULL {
-			return fmt.Errorf("failed to set initial parameters: %s", resp.Error.Description)
-		}
+		// InitialSetParameters is now handled by GRPCCallNoAuth wrapper
 
 		resp2, err := client.WalletRecover(ctx, &pb.RpcWalletRecoverRequest{
 			AccountKey: accountKey,
@@ -275,14 +264,7 @@ func CreateWallet(name, rootPath, apiAddr, networkConfigPath string) (string, st
 	var accountKey string
 
 	err := GRPCCallNoAuth(func(ctx context.Context, client service.ClientCommandsClient) error {
-		_, err := client.InitialSetParameters(ctx, &pb.RpcInitialSetParametersRequest{
-			Platform: runtime.GOOS,
-			Version:  Version,
-			Workdir:  config.GetWorkDir(),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to set initial parameters: %w", err)
-		}
+		// InitialSetParameters is now handled by GRPCCallNoAuth wrapper
 
 		createResp, err := client.WalletCreate(ctx, &pb.RpcWalletCreateRequest{
 			RootPath: rootPath,
