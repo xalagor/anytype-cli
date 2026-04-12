@@ -10,6 +10,7 @@ import (
 
 	"github.com/anyproto/anytype-cli/cmd/auth"
 	"github.com/anyproto/anytype-cli/cmd/config"
+	"github.com/anyproto/anytype-cli/cmd/doctor"
 	"github.com/anyproto/anytype-cli/cmd/serve"
 	"github.com/anyproto/anytype-cli/cmd/service"
 	"github.com/anyproto/anytype-cli/cmd/shell"
@@ -51,6 +52,7 @@ func init() {
 	rootCmd.AddCommand(
 		auth.NewAuthCmd(),
 		config.NewConfigCmd(),
+		doctor.NewDoctorCmd(),
 		serve.NewServeCmd(),
 		service.NewServiceCmd(),
 		shell.NewShellCmd(rootCmd),
