@@ -1,6 +1,7 @@
 package images
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -86,6 +87,13 @@ func runTagger(spaceId, relationName, pythonExe string, genThresh, charThresh fl
 	}
 	defer os.RemoveAll(tempDir)
 
+	// Discover the gateway HTTP URL by opening the first available space.
+	// The gateway is an account-wide HTTP server; its port is dynamic (starts at 47800).
+	gatewayURL, err := core.GetGatewayURL(spaceIds[0])
+	if err != nil {
+		return output.Error("Failed to get gateway URL: %w", err)
+	}
+
 	// Start the persistent tagger process. The model is loaded here once;
 	// all images in every space share the same running process.
 	output.Info("Loading WD EVA02 large v3 model (downloading on first run — this may take a few minutes)…")
@@ -145,12 +153,15 @@ func runTagger(spaceId, relationName, pythonExe string, genThresh, charThresh fl
 			}
 			link := objectDeepLink(img.ObjectId, sid)
 
-			// Download the image. The local file is renamed to use the objectId
-			// as its base name to avoid any special characters in the original
-			// name causing filesystem or path issues.
-			localPath, err := core.DownloadImageSafe(img.ObjectId, tempDir)
+			// Download via the HTTP gateway. The file is saved as <objectId><ext>,
+			// so special characters in the original name never touch the filesystem.
+			localPath, err := core.DownloadImageViaGateway(img.ObjectId, tempDir, gatewayURL)
 			if err != nil {
-				output.Warning("  skip %s\n    %s\n    %v", label, link, err)
+				if errors.Is(err, core.ErrImageFormatNotSupported) {
+					output.Info("  skip %s (format not supported by tagger)\n    %s", label, link)
+				} else {
+					output.Warning("  skip %s\n    %s\n    %v", label, link, err)
+				}
 				totalSkipped++
 				continue
 			}

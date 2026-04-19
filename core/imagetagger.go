@@ -3,8 +3,10 @@ package core
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,10 @@ import (
 	"github.com/anyproto/anytype-heart/pkg/lib/pb/model"
 	"github.com/anyproto/anytype-heart/util/pbtypes"
 )
+
+// ErrImageFormatNotSupported is returned when an image format (e.g. SVG) cannot
+// be processed by the ONNX tagger.
+var ErrImageFormatNotSupported = errors.New("image format not supported by tagger")
 
 // ImageObject holds metadata for an Anytype image object.
 type ImageObject struct {
@@ -129,44 +135,92 @@ func FindUntaggedImages(spaceId, relationKey string) ([]ImageObject, error) {
 	return images, err
 }
 
-// DownloadImageToDir downloads an image object to the given directory.
-// Returns the local path where the file was saved.
-func DownloadImageToDir(objectId, dir string) (string, error) {
-	var localPath string
+// GetGatewayURL returns the HTTP gateway base URL (e.g. "http://127.0.0.1:47800")
+// by opening the workspace for spaceId and reading AccountInfo.GatewayUrl.
+func GetGatewayURL(spaceId string) (string, error) {
+	var gatewayURL string
 	err := GRPCCall(func(ctx context.Context, client service.ClientCommandsClient) error {
-		req := &pb.RpcFileDownloadRequest{
-			ObjectId: objectId,
-			Path:     dir,
-		}
-		resp, err := client.FileDownload(ctx, req)
+		resp, err := client.WorkspaceOpen(ctx, &pb.RpcWorkspaceOpenRequest{SpaceId: spaceId})
 		if err != nil {
-			return fmt.Errorf("download image %s: %w", objectId, err)
+			return fmt.Errorf("workspace open: %w", err)
 		}
-		if resp.Error != nil && resp.Error.Code != pb.RpcFileDownloadResponseError_NULL {
-			return fmt.Errorf("download error: %s", resp.Error.Description)
+		if resp.Error != nil && resp.Error.Code != pb.RpcWorkspaceOpenResponseError_NULL {
+			return fmt.Errorf("workspace open error: %s", resp.Error.Description)
 		}
-		localPath = resp.LocalPath
+		if resp.Info == nil {
+			return fmt.Errorf("workspace info is nil")
+		}
+		gatewayURL = resp.Info.GatewayUrl
 		return nil
 	})
-	return localPath, err
+	return gatewayURL, err
 }
 
-// DownloadImageSafe downloads an image and renames the local file to use
-// objectId as the base name. This avoids problems caused by special characters
-// in the original file name on Windows and Linux without touching the object in Anytype.
-func DownloadImageSafe(objectId, dir string) (string, error) {
-	localPath, err := DownloadImageToDir(objectId, dir)
+// DownloadImageViaGateway fetches an image from the embedded HTTP gateway and
+// saves it to dir/<objectId><ext> where ext is derived from the Content-Type
+// header. This avoids the gRPC FileDownload path which saves the file using the
+// original object name and fails when that name contains Windows-invalid
+// characters (?, |, :, ", /, etc.).
+//
+// Returns ErrImageFormatNotSupported (wrapped) for SVG or other formats that the
+// ONNX tagger cannot process. The caller should skip such images gracefully.
+func DownloadImageViaGateway(objectId, dir, gatewayURL string) (string, error) {
+	url := gatewayURL + "/file/" + objectId
+	resp, err := http.Get(url) //nolint:noctx
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("download image %s: %w", objectId, err)
 	}
-	ext := filepath.Ext(localPath)
-	safePath := filepath.Join(dir, objectId+ext)
-	if localPath != safePath {
-		if renErr := os.Rename(localPath, safePath); renErr == nil {
-			return safePath, nil
-		}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download image %s: HTTP %d", objectId, resp.StatusCode)
+	}
+
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.Contains(ct, "svg") {
+		return "", fmt.Errorf("%w: SVG", ErrImageFormatNotSupported)
+	}
+
+	ext := contentTypeToExt(ct)
+	localPath := filepath.Join(dir, objectId+ext)
+
+	f, err := os.Create(localPath)
+	if err != nil {
+		return "", fmt.Errorf("create temp file for %s: %w", objectId, err)
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		os.Remove(localPath)
+		return "", fmt.Errorf("write image data for %s: %w", objectId, err)
 	}
 	return localPath, nil
+}
+
+// contentTypeToExt maps a Content-Type value to a file extension.
+func contentTypeToExt(ct string) string {
+	if i := strings.Index(ct, ";"); i >= 0 {
+		ct = ct[:i]
+	}
+	ct = strings.TrimSpace(ct)
+	switch ct {
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "image/bmp":
+		return ".bmp"
+	case "image/tiff":
+		return ".tiff"
+	case "image/avif":
+		return ".avif"
+	default:
+		return ".jpg"
+	}
 }
 
 // SetObjectTextRelation sets a text relation value on an Anytype object.
