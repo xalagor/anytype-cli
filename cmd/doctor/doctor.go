@@ -4,6 +4,7 @@ import (
 	"github.com/spf13/cobra"
 
 	duplicatesCmd "github.com/anyproto/anytype-cli/cmd/doctor/duplicates"
+	imagesCmd "github.com/anyproto/anytype-cli/cmd/doctor/images"
 )
 
 func NewDoctorCmd() *cobra.Command {
@@ -14,6 +15,7 @@ func NewDoctorCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(duplicatesCmd.NewDuplicatesCmd())
+	cmd.AddCommand(imagesCmd.NewImagesCmd())
 
 	return cmd
 }
