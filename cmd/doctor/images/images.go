@@ -35,7 +35,7 @@ func NewImagesCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&taggerFlag, "tagger", false, "Tag images with WD14 ViT v3 tagger (requires Python + onnxruntime + Pillow + huggingface_hub)")
+	cmd.Flags().BoolVar(&taggerFlag, "tagger", false, "Tag images with WD EVA02 large v3 tagger (requires Python + onnxruntime + Pillow + huggingface_hub)")
 	cmd.Flags().StringVar(&spaceId, "space", "", "Space `id` to process (default: all spaces)")
 	cmd.Flags().StringVar(&relationName, "relation", "WD14 Tagger", "Display name of the relation to store tags in")
 	cmd.Flags().StringVar(&pythonExe, "python", "python3", "Python executable to use for the tagger")
@@ -86,6 +86,16 @@ func runTagger(spaceId, relationName, pythonExe string, genThresh, charThresh fl
 	}
 	defer os.RemoveAll(tempDir)
 
+	// Start the persistent tagger process. The model is loaded here once;
+	// all images in every space share the same running process.
+	output.Info("Loading WD EVA02 large v3 model (downloading on first run — this may take a few minutes)…")
+	tagger, err := core.StartWdTaggerServer(pythonExe, scriptPath, genThresh, charThresh)
+	if err != nil {
+		return output.Error("Failed to start tagger: %w", err)
+	}
+	defer tagger.Close()
+	output.Info("Tagger ready.")
+
 	var totalImages, totalTagged, totalSkipped int
 	done := false
 
@@ -135,16 +145,18 @@ func runTagger(spaceId, relationName, pythonExe string, genThresh, charThresh fl
 			}
 			link := objectDeepLink(img.ObjectId, sid)
 
-			// Download the image to the temp directory.
-			localPath, err := core.DownloadImageToDir(img.ObjectId, tempDir)
+			// Download the image. The local file is renamed to use the objectId
+			// as its base name to avoid any special characters in the original
+			// name causing filesystem or path issues.
+			localPath, err := core.DownloadImageSafe(img.ObjectId, tempDir)
 			if err != nil {
 				output.Warning("  skip %s\n    %s\n    %v", label, link, err)
 				totalSkipped++
 				continue
 			}
 
-			// Run the WD14 tagger.
-			tags, err := core.RunWdTagger(pythonExe, scriptPath, localPath, genThresh, charThresh)
+			// Send the image to the already-running tagger process.
+			tags, err := tagger.TagImage(localPath)
 			os.Remove(localPath)
 			if err != nil {
 				output.Warning("  skip %s\n    %s\n    %v", label, link, err)
@@ -164,7 +176,8 @@ func runTagger(spaceId, relationName, pythonExe string, genThresh, charThresh fl
 				continue
 			}
 
-			// Write the tags back to the Anytype object.
+			// Write the tags into the existing Anytype object's relation field.
+			// The image itself is never re-uploaded; only this metadata field changes.
 			if err := core.SetObjectTextRelation(img.ObjectId, relKey, tags); err != nil {
 				output.Warning("  skip %s\n    %s\n    failed to save: %v", label, link, err)
 				totalSkipped++

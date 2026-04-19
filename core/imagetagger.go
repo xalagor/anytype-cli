@@ -1,8 +1,10 @@
 package core
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -149,6 +151,24 @@ func DownloadImageToDir(objectId, dir string) (string, error) {
 	return localPath, err
 }
 
+// DownloadImageSafe downloads an image and renames the local file to use
+// objectId as the base name. This avoids problems caused by special characters
+// in the original file name on Windows and Linux without touching the object in Anytype.
+func DownloadImageSafe(objectId, dir string) (string, error) {
+	localPath, err := DownloadImageToDir(objectId, dir)
+	if err != nil {
+		return "", err
+	}
+	ext := filepath.Ext(localPath)
+	safePath := filepath.Join(dir, objectId+ext)
+	if localPath != safePath {
+		if renErr := os.Rename(localPath, safePath); renErr == nil {
+			return safePath, nil
+		}
+	}
+	return localPath, nil
+}
+
 // SetObjectTextRelation sets a text relation value on an Anytype object.
 func SetObjectTextRelation(objectId, relationKey, value string) error {
 	return GRPCCall(func(ctx context.Context, client service.ClientCommandsClient) error {
@@ -172,11 +192,24 @@ func SetObjectTextRelation(objectId, relationKey, value string) error {
 	})
 }
 
-// wdTaggerScript is a minimal Python script for WD14 ViT v3 tagging.
-// Usage: python wdtagger.py <image_path> [general_thresh] [char_thresh]
-// Outputs comma-separated tags to stdout.
+// wdTaggerScript is a persistent Python tagger server using WD EVA02 large v3.
+// The model is loaded once at startup; subsequent requests are handled via
+// a simple stdin/stdout line protocol.
+//
+// Usage: python wdtagger.py [general_thresh] [char_thresh]
+// Protocol:
+//
+//	startup  → prints "READY\n" once the model is loaded
+//	request  → caller writes "<image_path>\n" to stdin
+//	response → script writes "OK:<comma-separated tags>\n" or "ERR:<msg>\n"
 const wdTaggerScript = `#!/usr/bin/env python3
-"""WD14 ViT v3 single-image tagger for anytype-cli."""
+"""WD EVA02 large v3 tagger server – loads model once, processes many images.
+Usage: python wdtagger.py [general_thresh] [char_thresh]
+Protocol (stdin/stdout):
+  startup:  prints "READY" once the ONNX model is loaded
+  request:  one image path per stdin line
+  response: "OK:<comma-separated tags>" or "ERR:<message>" per image
+"""
 import sys
 import csv
 import numpy as np
@@ -184,11 +217,11 @@ from PIL import Image
 from huggingface_hub import hf_hub_download
 import onnxruntime as ort
 
-MODEL_REPO = "SmilingWolf/wd-vit-tagger-v3"
+MODEL_REPO = "SmilingWolf/wd-eva02-large-tagger-v3"
 
 def load_model():
     model_path = hf_hub_download(MODEL_REPO, "model.onnx")
-    tags_path = hf_hub_download(MODEL_REPO, "selected_tags.csv")
+    tags_path  = hf_hub_download(MODEL_REPO, "selected_tags.csv")
     sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
     target_size = int(sess.get_inputs()[0].shape[2])
     tags = []
@@ -199,7 +232,7 @@ def load_model():
 
 def preprocess(img_path, size):
     img = Image.open(img_path).convert("RGBA")
-    bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+    bg  = Image.new("RGBA", img.size, (255, 255, 255, 255))
     bg.paste(img, mask=img.split()[3])
     img = bg.convert("RGB")
     w, h = img.size
@@ -210,19 +243,9 @@ def preprocess(img_path, size):
     arr = np.array(pad, dtype=np.float32)[:, :, ::-1]  # RGB -> BGR
     return np.expand_dims(arr, 0)
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: wdtagger.py <image> [general_thresh] [char_thresh]", file=sys.stderr)
-        sys.exit(1)
-
-    img_path = sys.argv[1]
-    gen_thresh = float(sys.argv[2]) if len(sys.argv) > 2 else 0.35
-    char_thresh = float(sys.argv[3]) if len(sys.argv) > 3 else 0.85
-
-    sess, tags, size = load_model()
-    arr = preprocess(img_path, size)
+def tag_image(sess, tags, size, img_path, gen_thresh, char_thresh):
+    arr   = preprocess(img_path, size)
     preds = sess.run(None, {sess.get_inputs()[0].name: arr})[0][0]
-
     result = []
     for i, row in enumerate(tags):
         if i >= len(preds):
@@ -231,13 +254,31 @@ def main():
             cat = int(row.get("category", 9))
         except (ValueError, TypeError):
             cat = 9
-        if cat == 9:  # skip rating tags
+        if cat == 9:   # skip rating tags
             continue
         thresh = char_thresh if cat == 4 else gen_thresh
         if float(preds[i]) >= thresh:
             result.append(row["name"].replace("_", " "))
+    return ", ".join(result)
 
-    print(", ".join(result))
+def main():
+    gen_thresh  = float(sys.argv[1]) if len(sys.argv) > 1 else 0.35
+    char_thresh = float(sys.argv[2]) if len(sys.argv) > 2 else 0.85
+
+    sess, tags, size = load_model()
+    sys.stdout.write("READY\n")
+    sys.stdout.flush()
+
+    for line in sys.stdin:
+        img_path = line.rstrip("\n")
+        if not img_path:
+            continue
+        try:
+            result = tag_image(sess, tags, size, img_path, gen_thresh, char_thresh)
+            sys.stdout.write("OK:" + result + "\n")
+        except Exception as e:
+            sys.stdout.write("ERR:" + str(e).replace("\n", " ") + "\n")
+        sys.stdout.flush()
 
 if __name__ == "__main__":
     main()
@@ -259,7 +300,6 @@ func WriteWdTaggerScript() (string, error) {
 // "python" is typically available.
 func ResolvePython(requested string) (string, error) {
 	if requested != "python3" {
-		// User explicitly overrode the default — trust them.
 		if _, err := exec.LookPath(requested); err != nil {
 			return "", fmt.Errorf("%q not found in PATH", requested)
 		}
@@ -273,23 +313,76 @@ func ResolvePython(requested string) (string, error) {
 	return "", fmt.Errorf("no Python interpreter found in PATH (tried python3, python); install Python or pass --python")
 }
 
-// RunWdTagger invokes the Python tagger script on a single image and returns
-// the comma-separated tag string.
-func RunWdTagger(python, scriptPath, imagePath string, generalThresh, charThresh float64) (string, error) {
+// WdTaggerServer manages a long-running Python tagger process.
+// The ONNX model is loaded once at startup; subsequent TagImage calls are fast
+// because there is no process-launch or model-load overhead.
+type WdTaggerServer struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *bufio.Scanner
+}
+
+// StartWdTaggerServer launches the Python tagger and blocks until the model is
+// fully loaded (signalled by "READY" on stdout). On the first run the model
+// must be downloaded from HuggingFace Hub, which may take several minutes;
+// download progress is printed to stderr so the user can see it.
+func StartWdTaggerServer(python, scriptPath string, genThresh, charThresh float64) (*WdTaggerServer, error) {
 	cmd := exec.Command(
-		python, scriptPath, imagePath,
-		fmt.Sprintf("%.2f", generalThresh),
+		python, scriptPath,
+		fmt.Sprintf("%.2f", genThresh),
 		fmt.Sprintf("%.2f", charThresh),
 	)
-	out, err := cmd.Output()
+
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			stderr := strings.TrimSpace(string(exitErr.Stderr))
-			if stderr != "" {
-				return "", fmt.Errorf("tagger error: %s", stderr)
-			}
-		}
-		return "", fmt.Errorf("tagger error: %w", err)
+		return nil, fmt.Errorf("tagger stdin pipe: %w", err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("tagger stdout pipe: %w", err)
+	}
+	// Let Python's stderr (download progress, warnings) flow to the terminal.
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start tagger process: %w", err)
+	}
+
+	scanner := bufio.NewScanner(stdoutPipe)
+	for scanner.Scan() {
+		if scanner.Text() == "READY" {
+			return &WdTaggerServer{cmd: cmd, stdin: stdin, stdout: scanner}, nil
+		}
+	}
+	_ = cmd.Wait()
+	return nil, fmt.Errorf("tagger process exited before the model was ready")
+}
+
+// TagImage sends an image path to the running tagger and returns the
+// comma-separated tag string produced by the model.
+func (t *WdTaggerServer) TagImage(imagePath string) (string, error) {
+	if _, err := fmt.Fprintln(t.stdin, imagePath); err != nil {
+		return "", fmt.Errorf("send image path to tagger: %w", err)
+	}
+	if !t.stdout.Scan() {
+		if err := t.stdout.Err(); err != nil {
+			return "", fmt.Errorf("read tagger response: %w", err)
+		}
+		return "", fmt.Errorf("tagger process closed unexpectedly")
+	}
+	line := t.stdout.Text()
+	switch {
+	case strings.HasPrefix(line, "OK:"):
+		return strings.TrimPrefix(line, "OK:"), nil
+	case strings.HasPrefix(line, "ERR:"):
+		return "", fmt.Errorf("tagger: %s", strings.TrimPrefix(line, "ERR:"))
+	default:
+		return "", fmt.Errorf("unexpected tagger output: %s", line)
+	}
+}
+
+// Close shuts down the tagger process gracefully by closing its stdin.
+func (t *WdTaggerServer) Close() error {
+	_ = t.stdin.Close()
+	return t.cmd.Wait()
 }
