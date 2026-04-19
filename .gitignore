@@ -10,3 +10,4 @@
 .idea/
 dist/
 .log
+.mcp.json
