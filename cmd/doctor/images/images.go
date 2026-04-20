@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 
 	"github.com/spf13/cobra"
 
@@ -12,10 +13,15 @@ import (
 	"github.com/anyproto/anytype-cli/core/output"
 )
 
+const sourceRelObjectId = "bafyreiciy7gpgdnsb2s3qdgvanvsksxkhbczlzf63vnhazzk2sqcyco2xu"
+
+var pinterestNameRe = regexp.MustCompile(`^pinterest_(\d+)$`)
+
 func NewImagesCmd() *cobra.Command {
 	var (
 		spaceId      string
 		taggerFlag   bool
+		namesFlag    bool
 		relationName string
 		pythonExe    string
 		genThresh    float64
@@ -29,14 +35,18 @@ func NewImagesCmd() *cobra.Command {
 		Short: "Doctor commands for image objects",
 		Long:  "Run diagnostics and enrichment operations on image objects in your Anytype spaces",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !taggerFlag {
+			if !taggerFlag && !namesFlag {
 				return cmd.Help()
+			}
+			if namesFlag {
+				return runNames(spaceId, dryRun, limit)
 			}
 			return runTagger(spaceId, relationName, pythonExe, genThresh, charThresh, dryRun, limit)
 		},
 	}
 
 	cmd.Flags().BoolVar(&taggerFlag, "tagger", false, "Tag images with WD EVA02 large v3 tagger (requires Python + onnxruntime + Pillow + huggingface_hub)")
+	cmd.Flags().BoolVar(&namesFlag, "names", false, "Restore Source | URL for images whose name matches pinterest_<id>")
 	cmd.Flags().StringVar(&spaceId, "space", "", "Space `id` to process (default: all spaces)")
 	cmd.Flags().StringVar(&relationName, "relation", "WD14 Tagger", "Display name of the relation to store tags in")
 	cmd.Flags().StringVar(&pythonExe, "python", "python3", "Python executable to use for the tagger")
@@ -205,6 +215,103 @@ func runTagger(spaceId, relationName, pythonExe string, genThresh, charThresh fl
 		output.Info("Dry run: %d/%d images would be tagged, %d skipped", totalTagged, totalImages, totalSkipped)
 	} else {
 		output.Info("Done: %d tagged, %d skipped (of %d found)", totalTagged, totalSkipped, totalImages)
+	}
+	return nil
+}
+
+func runNames(spaceId string, dryRun bool, limit int) error {
+	var spaceIds []string
+	if spaceId != "" {
+		spaceIds = []string{spaceId}
+	} else {
+		spaces, err := core.ListSpaces()
+		if err != nil {
+			return output.Error("Failed to list spaces: %w", err)
+		}
+		for _, s := range spaces {
+			spaceIds = append(spaceIds, s.SpaceId)
+		}
+	}
+
+	if len(spaceIds) == 0 {
+		output.Info("No spaces found")
+		return nil
+	}
+
+	var totalFound, totalRestored, totalSkipped int
+	done := false
+
+	for _, sid := range spaceIds {
+		if done {
+			break
+		}
+
+		sourceRelKey, err := core.FindRelationKeyByObjectId(sid, sourceRelObjectId)
+		if err != nil {
+			output.Warning("Space %s: %v — skipping", sid, err)
+			continue
+		}
+
+		images, err := core.FindImagesWithEmptyRelation(sid, sourceRelKey)
+		if err != nil {
+			output.Warning("Space %s: failed to find images: %v", sid, err)
+			continue
+		}
+
+		// Filter to pinterest_ names only.
+		var matches []core.ImageObject
+		for _, img := range images {
+			if pinterestNameRe.MatchString(img.Name) {
+				matches = append(matches, img)
+			}
+		}
+
+		if len(matches) == 0 {
+			output.Info("Space %s: no pinterest images without Source URL", sid)
+			continue
+		}
+
+		if limit > 0 {
+			remaining := limit - totalFound
+			if remaining <= 0 {
+				done = true
+				break
+			}
+			if len(matches) > remaining {
+				matches = matches[:remaining]
+			}
+		}
+
+		output.Info("Space %s: found %d pinterest image(s) to restore", sid, len(matches))
+		totalFound += len(matches)
+
+		for _, img := range matches {
+			m := pinterestNameRe.FindStringSubmatch(img.Name)
+			pinURL := "https://www.pinterest.com/pin/" + m[1] + "/"
+			link := objectDeepLink(img.ObjectId, sid)
+
+			if dryRun {
+				output.Info("  [dry-run] %s\n    %s\n    -> %s", img.Name, link, pinURL)
+				totalRestored++
+				continue
+			}
+
+			if err := core.SetObjectTextRelation(img.ObjectId, sourceRelKey, pinURL); err != nil {
+				output.Warning("  skip %s\n    %s\n    failed to save: %v", img.Name, link, err)
+				totalSkipped++
+				continue
+			}
+
+			output.Success("  %s\n    %s\n    -> %s", img.Name, link, pinURL)
+			totalRestored++
+		}
+	}
+
+	fmt.Println()
+	if dryRun {
+		output.Info("Dry run: %d/%d images would be restored, %d skipped", totalRestored, totalFound, totalSkipped)
+	} else {
+		output.Info("Done: %d restored, %d skipped (of %d found)", totalRestored, totalSkipped, totalFound)
 	}
 	return nil
 }

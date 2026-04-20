@@ -135,6 +135,62 @@ func FindUntaggedImages(spaceId, relationKey string) ([]ImageObject, error) {
 	return images, err
 }
 
+// FindImagesWithEmptyRelation returns image objects in the space where the given relation key is empty.
+func FindImagesWithEmptyRelation(spaceId, relationKey string) ([]ImageObject, error) {
+	var images []ImageObject
+	err := GRPCCall(func(ctx context.Context, client service.ClientCommandsClient) error {
+		req := &pb.RpcObjectSearchRequest{
+			SpaceId: spaceId,
+			Filters: []*model.BlockContentDataviewFilter{
+				{
+					RelationKey: bundle.RelationKeyResolvedLayout.String(),
+					Condition:   model.BlockContentDataviewFilter_Equal,
+					Value:       pbtypes.Int64(int64(model.ObjectType_image)),
+				},
+				{
+					RelationKey: relationKey,
+					Condition:   model.BlockContentDataviewFilter_Empty,
+				},
+				{
+					RelationKey: bundle.RelationKeyIsHidden.String(),
+					Condition:   model.BlockContentDataviewFilter_Equal,
+					Value:       pbtypes.Bool(false),
+				},
+				{
+					RelationKey: bundle.RelationKeyIsArchived.String(),
+					Condition:   model.BlockContentDataviewFilter_Equal,
+					Value:       pbtypes.Bool(false),
+				},
+				{
+					RelationKey: bundle.RelationKeyIsDeleted.String(),
+					Condition:   model.BlockContentDataviewFilter_Equal,
+					Value:       pbtypes.Bool(false),
+				},
+			},
+			Keys: []string{
+				bundle.RelationKeyId.String(),
+				bundle.RelationKeyName.String(),
+			},
+		}
+		resp, err := client.ObjectSearch(ctx, req)
+		if err != nil {
+			return fmt.Errorf("search images: %w", err)
+		}
+		if resp.Error != nil && resp.Error.Code != pb.RpcObjectSearchResponseError_NULL {
+			return fmt.Errorf("search error: %s", resp.Error.Description)
+		}
+		for _, record := range resp.Records {
+			id := pbtypes.GetString(record, bundle.RelationKeyId.String())
+			name := pbtypes.GetString(record, bundle.RelationKeyName.String())
+			if id != "" {
+				images = append(images, ImageObject{ObjectId: id, Name: name, SpaceId: spaceId})
+			}
+		}
+		return nil
+	})
+	return images, err
+}
+
 // GetGatewayURL returns the HTTP gateway base URL (e.g. "http://127.0.0.1:47800")
 // by opening the workspace for spaceId and reading AccountInfo.GatewayUrl.
 func GetGatewayURL(spaceId string) (string, error) {
