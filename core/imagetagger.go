@@ -569,6 +569,21 @@ def main():
     import torch
     from transformers import AutoProcessor, AutoModelForCausalLM
     import transformers.configuration_utils as _cu
+    import transformers.dynamic_module_utils as _dmu
+
+    # The old cached modeling_florence2.py contains "import flash_attn" which
+    # transformers 4.44.2's check_imports detects as a hard requirement and raises
+    # ImportError when flash_attn is absent, even though the model uses it
+    # optionally inside a try/except block.  Patch check_imports to skip it.
+    _orig_check_imports = _dmu.check_imports
+    def _patched_check_imports(filename):
+        try:
+            return _orig_check_imports(filename)
+        except ImportError as e:
+            if 'flash_attn' in str(e):
+                return []
+            raise
+    _dmu.check_imports = _patched_check_imports
 
     # Florence-2's configuration code (trust_remote_code) accesses
     # self.forced_bos_token_id before super().__init__() sets it.
