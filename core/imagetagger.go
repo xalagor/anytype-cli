@@ -559,6 +559,7 @@ def main():
         model_id,
         torch_dtype=dtype,
         trust_remote_code=True,
+        attn_implementation="eager",
     ).to(device)
     model.eval()
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
