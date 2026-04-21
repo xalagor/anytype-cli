@@ -553,6 +553,17 @@ def main():
             raise
     _cu.PretrainedConfig.__getattribute__ = _safe_getattribute
 
+    # Florence-2's processing_florence2.py accesses tokenizer.additional_special_tokens
+    # which in newer transformers raises AttributeError through __getattr__ when the
+    # internal _additional_special_tokens list hasn't been initialised yet.
+    import transformers.tokenization_utils_base as _tub
+    _orig_tok_getattr = _tub.PreTrainedTokenizerBase.__getattr__
+    def _safe_tok_getattr(self, key):
+        if key == 'additional_special_tokens':
+            return getattr(self, '_additional_special_tokens', [])
+        return _orig_tok_getattr(self, key)
+    _tub.PreTrainedTokenizerBase.__getattr__ = _safe_tok_getattr
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype  = torch.float16 if device == "cuda" else torch.float32
 
@@ -637,12 +648,13 @@ func EnsureFlorenceVenv(basePython, venvDir string) (string, error) {
 	pip := florenceVenvPip(venvDir)
 	_ = exec.Command(pip, "install", "--quiet", "--upgrade", "pip").Run()
 
-	// transformers 4.44.2 is the last release fully compatible with Florence-2's
-	// trust_remote_code scripts. 4.46+ has breaking changes in PretrainedConfig
-	// __getattribute__, attention implementation detection, and tokenizer APIs.
+	// We install the latest transformers without a version pin: older releases
+	// (e.g. 4.44.2) require tokenizers<0.20 which cannot be built on Python 3.13.
+	// Compatibility with Florence-2's trust_remote_code scripts is maintained via
+	// targeted monkey-patches applied in the Python script at startup.
 	deps := []string{
-		"transformers==4.44.2",
 		"torch",
+		"transformers",
 		"Pillow",
 		"einops",
 		"timm",
