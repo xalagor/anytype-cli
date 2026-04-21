@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/anyproto/anytype-heart/pb"
@@ -614,10 +615,83 @@ type FlorenceServer struct {
 	stdout *bufio.Scanner
 }
 
+// EnsureFlorenceVenv creates (if needed) a Python virtual environment at venvDir
+// and installs Florence-2 compatible dependencies with pinned versions.
+// Returns the path to the Python interpreter inside the venv.
+//
+// Florence-2's trust_remote_code scripts were written for transformers ~4.38–4.45;
+// newer versions (4.46+) have breaking API changes in several places. Pinning to
+// 4.44.2 inside an isolated venv avoids conflicts with the user's system packages.
+func EnsureFlorenceVenv(basePython, venvDir string) (string, error) {
+	pythonPath := florenceVenvPython(venvDir)
+
+	if _, err := os.Stat(pythonPath); err == nil {
+		return pythonPath, nil // venv already ready
+	}
+
+	fmt.Fprintf(os.Stderr, "Creating Florence-2 venv at %s …\n", venvDir)
+	if out, err := exec.Command(basePython, "-m", "venv", venvDir).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("create venv: %w\n%s", err, out)
+	}
+
+	pip := florenceVenvPip(venvDir)
+	_ = exec.Command(pip, "install", "--quiet", "--upgrade", "pip").Run()
+
+	// transformers 4.44.2 is the last release fully compatible with Florence-2's
+	// trust_remote_code scripts. 4.46+ has breaking changes in PretrainedConfig
+	// __getattribute__, attention implementation detection, and tokenizer APIs.
+	deps := []string{
+		"transformers==4.44.2",
+		"torch",
+		"Pillow",
+		"einops",
+		"timm",
+	}
+
+	fmt.Fprintf(os.Stderr, "Installing Florence-2 dependencies (%s) – this may take a few minutes…\n",
+		strings.Join(deps, ", "))
+	installCmd := exec.Command(pip, append([]string{"install"}, deps...)...)
+	installCmd.Stdout = os.Stderr
+	installCmd.Stderr = os.Stderr
+	if err := installCmd.Run(); err != nil {
+		os.RemoveAll(venvDir)
+		return "", fmt.Errorf("install dependencies: %w", err)
+	}
+
+	return pythonPath, nil
+}
+
+func florenceVenvPython(venvDir string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(venvDir, "Scripts", "python.exe")
+	}
+	return filepath.Join(venvDir, "bin", "python3")
+}
+
+func florenceVenvPip(venvDir string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(venvDir, "Scripts", "pip.exe")
+	}
+	return filepath.Join(venvDir, "bin", "pip3")
+}
+
 // StartFlorenceServer launches the Florence-2 process and blocks until the model
 // is fully loaded (signalled by "READY" on stdout). On the first run the model
 // weights are downloaded from HuggingFace Hub; download progress appears on stderr.
-func StartFlorenceServer(python, scriptPath, task, modelId string) (*FlorenceServer, error) {
+//
+// If venvDir is non-empty, EnsureFlorenceVenv is called first to create/reuse
+// an isolated venv with compatible dependencies; the venv's Python then replaces
+// the basePython for running the script.
+func StartFlorenceServer(basePython, scriptPath, task, modelId, venvDir string) (*FlorenceServer, error) {
+	python := basePython
+	if venvDir != "" {
+		var err error
+		python, err = EnsureFlorenceVenv(basePython, venvDir)
+		if err != nil {
+			return nil, fmt.Errorf("setup florence venv: %w", err)
+		}
+	}
+
 	cmd := exec.Command(python, scriptPath, task, modelId)
 
 	stdin, err := cmd.StdinPipe()

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 
 	"github.com/spf13/cobra"
@@ -18,6 +19,9 @@ const sourceRelObjectId = "bafyreiciy7gpgdnsb2s3qdgvanvsksxkhbczlzf63vnhazzk2sqc
 var pinterestNameRe = regexp.MustCompile(`^pinterest_(\d+)$`)
 
 func NewImagesCmd() *cobra.Command {
+	homeDir, _ := os.UserHomeDir()
+	defaultFlorenceVenv := filepath.Join(homeDir, ".anytype", "florence-venv")
+
 	var (
 		spaceId      string
 		taggerFlag   bool
@@ -33,6 +37,7 @@ func NewImagesCmd() *cobra.Command {
 		florenceRelation string
 		florenceTask     string
 		florenceModel    string
+		florenceVenv     string
 	)
 
 	cmd := &cobra.Command{
@@ -50,7 +55,7 @@ func NewImagesCmd() *cobra.Command {
 				return runNames(spaceId, dryRun, limit)
 			}
 			if florenceFlag {
-				return runFlorence(spaceId, florenceRelation, pythonExe, florenceTask, florenceModel, dryRun, limit)
+				return runFlorence(spaceId, florenceRelation, pythonExe, florenceTask, florenceModel, florenceVenv, dryRun, limit)
 			}
 			return runTagger(spaceId, relationName, pythonExe, genThresh, charThresh, dryRun, limit)
 		},
@@ -69,6 +74,7 @@ func NewImagesCmd() *cobra.Command {
 	cmd.Flags().StringVar(&florenceRelation, "florence-relation", "Florence 2 Caption", "Display name of the relation to store Florence-2 descriptions in")
 	cmd.Flags().StringVar(&florenceTask, "florence-task", "detailed", "Florence-2 captioning task: caption | detailed | more-detailed")
 	cmd.Flags().StringVar(&florenceModel, "florence-model", "microsoft/Florence-2-base", "HuggingFace model ID for Florence-2 (e.g. microsoft/Florence-2-large)")
+	cmd.Flags().StringVar(&florenceVenv, "florence-venv", defaultFlorenceVenv, "Python venv for Florence-2 (auto-created on first run with compatible deps; set \"\" to use system Python)")
 
 	return cmd
 }
@@ -331,7 +337,7 @@ func runNames(spaceId string, dryRun bool, limit int) error {
 	return nil
 }
 
-func runFlorence(spaceId, relationName, pythonExe, task, modelId string, dryRun bool, limit int) error {
+func runFlorence(spaceId, relationName, pythonExe, task, modelId, venvDir string, dryRun bool, limit int) error {
 	var spaceIds []string
 	if spaceId != "" {
 		spaceIds = []string{spaceId}
@@ -372,7 +378,7 @@ func runFlorence(spaceId, relationName, pythonExe, task, modelId string, dryRun 
 	}
 
 	output.Info("Loading Florence-2 model %s (downloading on first run — this may take a few minutes)…", modelId)
-	florence, err := core.StartFlorenceServer(pythonExe, scriptPath, task, modelId)
+	florence, err := core.StartFlorenceServer(pythonExe, scriptPath, task, modelId, venvDir)
 	if err != nil {
 		return output.Error("Failed to start Florence-2: %w", err)
 	}
