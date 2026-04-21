@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/anyproto/anytype-heart/pb"
@@ -626,6 +627,20 @@ type FlorenceServer struct {
 	stdout *bufio.Scanner
 }
 
+// pythonMinorVersion returns the minor part of the Python version (e.g. 12 for 3.12).
+// Returns 99 on any error so callers assume the newest Python.
+func pythonMinorVersion(python string) int {
+	out, err := exec.Command(python, "-c", "import sys; print(sys.version_info.minor)").Output()
+	if err != nil {
+		return 99
+	}
+	minor, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 99
+	}
+	return minor
+}
+
 // EnsureFlorenceVenv creates (if needed) a Python virtual environment at venvDir
 // and installs Florence-2 compatible dependencies with pinned versions.
 // Returns the path to the Python interpreter inside the venv.
@@ -648,16 +663,18 @@ func EnsureFlorenceVenv(basePython, venvDir string) (string, error) {
 	pip := florenceVenvPip(venvDir)
 	_ = exec.Command(pip, "install", "--quiet", "--upgrade", "pip").Run()
 
-	// We install the latest transformers without a version pin: older releases
-	// (e.g. 4.44.2) require tokenizers<0.20 which cannot be built on Python 3.13.
-	// Compatibility with Florence-2's trust_remote_code scripts is maintained via
-	// targeted monkey-patches applied in the Python script at startup.
-	deps := []string{
-		"torch",
-		"transformers",
-		"Pillow",
-		"einops",
-		"timm",
+	// On Python ≤3.12 pin transformers to 4.44.2: the last release fully
+	// compatible with Florence-2's trust_remote_code scripts, and tokenizers
+	// 0.19.x (its dependency) ships pre-built wheels for 3.12 and earlier.
+	// On Python 3.13+ tokenizers<0.20 cannot be built (pyo3 0.21 only supports
+	// up to 3.12), so we install the latest transformers and rely on the
+	// monkey-patches in the Python script to handle API differences.
+	minor := pythonMinorVersion(basePython)
+	var deps []string
+	if minor <= 12 {
+		deps = []string{"transformers==4.44.2", "torch", "Pillow", "einops", "timm"}
+	} else {
+		deps = []string{"torch", "transformers", "Pillow", "einops", "timm"}
 	}
 
 	fmt.Fprintf(os.Stderr, "Installing Florence-2 dependencies (%s) – this may take a few minutes…\n",
