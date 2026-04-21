@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/anyproto/anytype-heart/pb"
@@ -495,4 +497,328 @@ func (t *WdTaggerServer) TagImage(imagePath string) (string, error) {
 func (t *WdTaggerServer) Close() error {
 	_ = t.stdin.Close()
 	return t.cmd.Wait()
+}
+
+// florenceScript is a persistent Python server that uses Microsoft Florence-2
+// to generate natural-language image descriptions.
+//
+// Usage: python florence2.py [task] [model_id]
+//
+//	task:     caption | detailed | more-detailed (default: detailed)
+//	model_id: HuggingFace model ID (default: microsoft/Florence-2-base)
+//
+// Protocol (identical to wdTaggerScript):
+//
+//	startup  → prints "READY\n" once the model is loaded
+//	request  → caller writes "<image_path>\n" to stdin
+//	response → script writes "OK:<description>\n" or "ERR:<msg>\n"
+const florenceScript = `#!/usr/bin/env python3
+"""Microsoft Florence-2 captioning server – loads model once, processes many images.
+Usage: python florence2.py [task] [model_id]
+  task:     caption | detailed | more-detailed  (default: detailed)
+  model_id: HuggingFace repo id               (default: microsoft/Florence-2-base)
+Protocol (stdin/stdout):
+  startup:  prints "READY" once the model is loaded
+  request:  one image path per stdin line
+  response: "OK:<description>" or "ERR:<message>" per image
+"""
+import os
+import shutil
+import sys
+from PIL import Image
+
+TASK_MAP = {
+    "caption":      "<CAPTION>",
+    "detailed":     "<DETAILED_CAPTION>",
+    "more-detailed":"<MORE_DETAILED_CAPTION>",
+}
+
+def _refresh_hf_module_cache(model_id):
+    """Delete cached trust_remote_code Python files so from_pretrained() fetches
+    the latest revision from HuggingFace. Model weights (blobs/) live in a
+    separate directory and are never touched by this function."""
+    try:
+        hf_home = os.environ.get("HF_HOME") or os.path.join(
+            os.path.expanduser("~"), ".cache", "huggingface"
+        )
+        if "/" in model_id:
+            org, name = model_id.split("/", 1)
+            module_dir = os.path.join(
+                hf_home, "modules", "transformers_modules",
+                org, name.replace("-", "_hyphen_"),
+            )
+        else:
+            module_dir = os.path.join(
+                hf_home, "modules", "transformers_modules",
+                model_id.replace("-", "_hyphen_"),
+            )
+        if os.path.exists(module_dir):
+            shutil.rmtree(module_dir)
+    except Exception:
+        pass  # non-fatal; from_pretrained will re-download anyway
+
+def main():
+    task_name = sys.argv[1] if len(sys.argv) > 1 else "detailed"
+    model_id  = sys.argv[2] if len(sys.argv) > 2 else "microsoft/Florence-2-base"
+    task = TASK_MAP.get(task_name, "<DETAILED_CAPTION>")
+
+    # Always fetch the latest model code from HuggingFace so that stale cached
+    # versions (e.g. the revision that hard-imports flash_attn) are not reused.
+    _refresh_hf_module_cache(model_id)
+
+    import torch
+    from transformers import AutoProcessor, AutoModelForCausalLM
+    import transformers.configuration_utils as _cu
+    import transformers.dynamic_module_utils as _dmu
+
+    # The old cached modeling_florence2.py contains "import flash_attn" which
+    # transformers 4.44.2's check_imports detects as a hard requirement and raises
+    # ImportError when flash_attn is absent, even though the model uses it
+    # optionally inside a try/except block.  Patch check_imports to skip it.
+    _orig_check_imports = _dmu.check_imports
+    def _patched_check_imports(filename):
+        try:
+            return _orig_check_imports(filename)
+        except ImportError as e:
+            if 'flash_attn' in str(e):
+                return []
+            raise
+    _dmu.check_imports = _patched_check_imports
+
+    # Florence-2's configuration code (trust_remote_code) accesses
+    # self.forced_bos_token_id before super().__init__() sets it.
+    # transformers >= 4.46 raises AttributeError in __getattribute__
+    # instead of returning None, so we patch it back for this attribute.
+    _orig_getattribute = _cu.PretrainedConfig.__getattribute__
+    def _safe_getattribute(self, key):
+        try:
+            return _orig_getattribute(self, key)
+        except AttributeError:
+            if key == 'forced_bos_token_id':
+                return None
+            raise
+    _cu.PretrainedConfig.__getattribute__ = _safe_getattribute
+
+    # Florence-2's processing_florence2.py accesses tokenizer.additional_special_tokens
+    # which in newer transformers raises AttributeError through __getattr__ when the
+    # internal _additional_special_tokens list hasn't been initialised yet.
+    # __getattr__ only exists in transformers >= 4.46; guard before patching.
+    import transformers.tokenization_utils_base as _tub
+    if hasattr(_tub.PreTrainedTokenizerBase, '__getattr__'):
+        _orig_tok_getattr = _tub.PreTrainedTokenizerBase.__getattr__
+        def _safe_tok_getattr(self, key):
+            if key == 'additional_special_tokens':
+                return getattr(self, '_additional_special_tokens', [])
+            return _orig_tok_getattr(self, key)
+        _tub.PreTrainedTokenizerBase.__getattr__ = _safe_tok_getattr
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype  = torch.float16 if device == "cuda" else torch.float32
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype=dtype,
+        trust_remote_code=True,
+        attn_implementation="eager",
+    ).to(device)
+    model.eval()
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+
+    sys.stdout.write("READY\n")
+    sys.stdout.flush()
+
+    for line in sys.stdin:
+        img_path = line.rstrip("\n")
+        if not img_path:
+            continue
+        try:
+            image = Image.open(img_path).convert("RGB")
+            inputs = processor(text=task, images=image, return_tensors="pt").to(device, dtype)
+            generated_ids = model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=1024,
+                num_beams=3,
+            )
+            generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+            parsed = processor.post_process_generation(
+                generated_text,
+                task=task,
+                image_size=(image.width, image.height),
+            )
+            description = parsed[task].strip().replace("\n", " ")
+            sys.stdout.write("OK:" + description + "\n")
+        except Exception as e:
+            sys.stdout.write("ERR:" + str(e).replace("\n", " ") + "\n")
+        sys.stdout.flush()
+
+if __name__ == "__main__":
+    main()
+`
+
+// WriteFlorenceScript writes the embedded Florence-2 Python script to a temp file
+// and returns the path. The file is reused across calls within a process.
+func WriteFlorenceScript() (string, error) {
+	scriptPath := filepath.Join(os.TempDir(), "anytype_florence2.py")
+	if err := os.WriteFile(scriptPath, []byte(florenceScript), 0o644); err != nil {
+		return "", fmt.Errorf("write florence script: %w", err)
+	}
+	return scriptPath, nil
+}
+
+// FlorenceServer manages a long-running Python Florence-2 captioning process.
+// The model is loaded once at startup; subsequent DescribeImage calls are fast.
+type FlorenceServer struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *bufio.Scanner
+}
+
+// pythonMinorVersion returns the minor part of the Python version (e.g. 12 for 3.12).
+// Returns 99 on any error so callers assume the newest Python.
+func pythonMinorVersion(python string) int {
+	out, err := exec.Command(python, "-c", "import sys; print(sys.version_info.minor)").Output()
+	if err != nil {
+		return 99
+	}
+	minor, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 99
+	}
+	return minor
+}
+
+// EnsureFlorenceVenv creates (if needed) a Python virtual environment at venvDir
+// and installs Florence-2 compatible dependencies with pinned versions.
+// Returns the path to the Python interpreter inside the venv.
+//
+// Florence-2's trust_remote_code scripts were written for transformers ~4.38–4.45;
+// newer versions (4.46+) have breaking API changes in several places. Pinning to
+// 4.44.2 inside an isolated venv avoids conflicts with the user's system packages.
+func EnsureFlorenceVenv(basePython, venvDir string) (string, error) {
+	pythonPath := florenceVenvPython(venvDir)
+
+	if _, err := os.Stat(pythonPath); err == nil {
+		return pythonPath, nil // venv already ready
+	}
+
+	fmt.Fprintf(os.Stderr, "Creating Florence-2 venv at %s …\n", venvDir)
+	if out, err := exec.Command(basePython, "-m", "venv", venvDir).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("create venv: %w\n%s", err, out)
+	}
+
+	pip := florenceVenvPip(venvDir)
+	_ = exec.Command(pip, "install", "--quiet", "--upgrade", "pip").Run()
+
+	// On Python ≤3.12 pin transformers to 4.44.2: the last release fully
+	// compatible with Florence-2's trust_remote_code scripts, and tokenizers
+	// 0.19.x (its dependency) ships pre-built wheels for 3.12 and earlier.
+	// On Python 3.13+ tokenizers<0.20 cannot be built (pyo3 0.21 only supports
+	// up to 3.12), so we install the latest transformers and rely on the
+	// monkey-patches in the Python script to handle API differences.
+	minor := pythonMinorVersion(basePython)
+	var deps []string
+	if minor <= 12 {
+		deps = []string{"transformers==4.44.2", "torch", "Pillow", "einops", "timm"}
+	} else {
+		deps = []string{"torch", "transformers", "Pillow", "einops", "timm"}
+	}
+
+	fmt.Fprintf(os.Stderr, "Installing Florence-2 dependencies (%s) – this may take a few minutes…\n",
+		strings.Join(deps, ", "))
+	installCmd := exec.Command(pip, append([]string{"install"}, deps...)...)
+	installCmd.Stdout = os.Stderr
+	installCmd.Stderr = os.Stderr
+	if err := installCmd.Run(); err != nil {
+		os.RemoveAll(venvDir)
+		return "", fmt.Errorf("install dependencies: %w", err)
+	}
+
+	return pythonPath, nil
+}
+
+func florenceVenvPython(venvDir string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(venvDir, "Scripts", "python.exe")
+	}
+	return filepath.Join(venvDir, "bin", "python3")
+}
+
+func florenceVenvPip(venvDir string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(venvDir, "Scripts", "pip.exe")
+	}
+	return filepath.Join(venvDir, "bin", "pip3")
+}
+
+// StartFlorenceServer launches the Florence-2 process and blocks until the model
+// is fully loaded (signalled by "READY" on stdout). On the first run the model
+// weights are downloaded from HuggingFace Hub; download progress appears on stderr.
+//
+// If venvDir is non-empty, EnsureFlorenceVenv is called first to create/reuse
+// an isolated venv with compatible dependencies; the venv's Python then replaces
+// the basePython for running the script.
+func StartFlorenceServer(basePython, scriptPath, task, modelId, venvDir string) (*FlorenceServer, error) {
+	python := basePython
+	if venvDir != "" {
+		var err error
+		python, err = EnsureFlorenceVenv(basePython, venvDir)
+		if err != nil {
+			return nil, fmt.Errorf("setup florence venv: %w", err)
+		}
+	}
+
+	cmd := exec.Command(python, scriptPath, task, modelId)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("florence stdin pipe: %w", err)
+	}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("florence stdout pipe: %w", err)
+	}
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start florence process: %w", err)
+	}
+
+	scanner := bufio.NewScanner(stdoutPipe)
+	for scanner.Scan() {
+		if scanner.Text() == "READY" {
+			return &FlorenceServer{cmd: cmd, stdin: stdin, stdout: scanner}, nil
+		}
+	}
+	_ = cmd.Wait()
+	return nil, fmt.Errorf("florence process exited before the model was ready")
+}
+
+// DescribeImage sends an image path to the running Florence-2 process and returns
+// the generated natural-language description.
+func (f *FlorenceServer) DescribeImage(imagePath string) (string, error) {
+	if _, err := fmt.Fprintln(f.stdin, imagePath); err != nil {
+		return "", fmt.Errorf("send image path to florence: %w", err)
+	}
+	if !f.stdout.Scan() {
+		if err := f.stdout.Err(); err != nil {
+			return "", fmt.Errorf("read florence response: %w", err)
+		}
+		return "", fmt.Errorf("florence process closed unexpectedly")
+	}
+	line := f.stdout.Text()
+	switch {
+	case strings.HasPrefix(line, "OK:"):
+		return strings.TrimPrefix(line, "OK:"), nil
+	case strings.HasPrefix(line, "ERR:"):
+		return "", fmt.Errorf("florence: %s", strings.TrimPrefix(line, "ERR:"))
+	default:
+		return "", fmt.Errorf("unexpected florence output: %s", line)
+	}
+}
+
+// Close shuts down the Florence-2 process gracefully by closing its stdin.
+func (f *FlorenceServer) Close() error {
+	_ = f.stdin.Close()
+	return f.cmd.Wait()
 }
