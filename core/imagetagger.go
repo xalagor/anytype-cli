@@ -536,6 +536,21 @@ def main():
 
     import torch
     from transformers import AutoProcessor, AutoModelForCausalLM
+    import transformers.configuration_utils as _cu
+
+    # Florence-2's configuration code (trust_remote_code) accesses
+    # self.forced_bos_token_id before super().__init__() sets it.
+    # transformers >= 4.46 raises AttributeError in __getattribute__
+    # instead of returning None, so we patch it back for this attribute.
+    _orig_getattribute = _cu.PretrainedConfig.__getattribute__
+    def _safe_getattribute(self, key):
+        try:
+            return _orig_getattribute(self, key)
+        except AttributeError:
+            if key == 'forced_bos_token_id':
+                return None
+            raise
+    _cu.PretrainedConfig.__getattribute__ = _safe_getattribute
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype  = torch.float16 if device == "cuda" else torch.float32
