@@ -522,6 +522,8 @@ Protocol (stdin/stdout):
   request:  one image path per stdin line
   response: "OK:<description>" or "ERR:<message>" per image
 """
+import os
+import shutil
 import sys
 from PIL import Image
 
@@ -531,10 +533,38 @@ TASK_MAP = {
     "more-detailed":"<MORE_DETAILED_CAPTION>",
 }
 
+def _refresh_hf_module_cache(model_id):
+    """Delete cached trust_remote_code Python files so from_pretrained() fetches
+    the latest revision from HuggingFace. Model weights (blobs/) live in a
+    separate directory and are never touched by this function."""
+    try:
+        hf_home = os.environ.get("HF_HOME") or os.path.join(
+            os.path.expanduser("~"), ".cache", "huggingface"
+        )
+        if "/" in model_id:
+            org, name = model_id.split("/", 1)
+            module_dir = os.path.join(
+                hf_home, "modules", "transformers_modules",
+                org, name.replace("-", "_hyphen_"),
+            )
+        else:
+            module_dir = os.path.join(
+                hf_home, "modules", "transformers_modules",
+                model_id.replace("-", "_hyphen_"),
+            )
+        if os.path.exists(module_dir):
+            shutil.rmtree(module_dir)
+    except Exception:
+        pass  # non-fatal; from_pretrained will re-download anyway
+
 def main():
     task_name = sys.argv[1] if len(sys.argv) > 1 else "detailed"
     model_id  = sys.argv[2] if len(sys.argv) > 2 else "microsoft/Florence-2-base"
     task = TASK_MAP.get(task_name, "<DETAILED_CAPTION>")
+
+    # Always fetch the latest model code from HuggingFace so that stale cached
+    # versions (e.g. the revision that hard-imports flash_attn) are not reused.
+    _refresh_hf_module_cache(model_id)
 
     import torch
     from transformers import AutoProcessor, AutoModelForCausalLM
