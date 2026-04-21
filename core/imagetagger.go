@@ -496,3 +496,163 @@ func (t *WdTaggerServer) Close() error {
 	_ = t.stdin.Close()
 	return t.cmd.Wait()
 }
+
+// florenceScript is a persistent Python server that uses Microsoft Florence-2
+// to generate natural-language image descriptions.
+//
+// Usage: python florence2.py [task] [model_id]
+//
+//	task:     caption | detailed | more-detailed (default: detailed)
+//	model_id: HuggingFace model ID (default: microsoft/Florence-2-base)
+//
+// Protocol (identical to wdTaggerScript):
+//
+//	startup  → prints "READY\n" once the model is loaded
+//	request  → caller writes "<image_path>\n" to stdin
+//	response → script writes "OK:<description>\n" or "ERR:<msg>\n"
+const florenceScript = `#!/usr/bin/env python3
+"""Microsoft Florence-2 captioning server – loads model once, processes many images.
+Usage: python florence2.py [task] [model_id]
+  task:     caption | detailed | more-detailed  (default: detailed)
+  model_id: HuggingFace repo id               (default: microsoft/Florence-2-base)
+Protocol (stdin/stdout):
+  startup:  prints "READY" once the model is loaded
+  request:  one image path per stdin line
+  response: "OK:<description>" or "ERR:<message>" per image
+"""
+import sys
+from PIL import Image
+
+TASK_MAP = {
+    "caption":      "<CAPTION>",
+    "detailed":     "<DETAILED_CAPTION>",
+    "more-detailed":"<MORE_DETAILED_CAPTION>",
+}
+
+def main():
+    task_name = sys.argv[1] if len(sys.argv) > 1 else "detailed"
+    model_id  = sys.argv[2] if len(sys.argv) > 2 else "microsoft/Florence-2-base"
+    task = TASK_MAP.get(task_name, "<DETAILED_CAPTION>")
+
+    import torch
+    from transformers import AutoProcessor, AutoModelForCausalLM
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype  = torch.float16 if device == "cuda" else torch.float32
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype=dtype,
+        trust_remote_code=True,
+    ).to(device)
+    model.eval()
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+
+    sys.stdout.write("READY\n")
+    sys.stdout.flush()
+
+    for line in sys.stdin:
+        img_path = line.rstrip("\n")
+        if not img_path:
+            continue
+        try:
+            image = Image.open(img_path).convert("RGB")
+            inputs = processor(text=task, images=image, return_tensors="pt").to(device, dtype)
+            generated_ids = model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=1024,
+                num_beams=3,
+            )
+            generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+            parsed = processor.post_process_generation(
+                generated_text,
+                task=task,
+                image_size=(image.width, image.height),
+            )
+            description = parsed[task].strip().replace("\n", " ")
+            sys.stdout.write("OK:" + description + "\n")
+        except Exception as e:
+            sys.stdout.write("ERR:" + str(e).replace("\n", " ") + "\n")
+        sys.stdout.flush()
+
+if __name__ == "__main__":
+    main()
+`
+
+// WriteFlorenceScript writes the embedded Florence-2 Python script to a temp file
+// and returns the path. The file is reused across calls within a process.
+func WriteFlorenceScript() (string, error) {
+	scriptPath := filepath.Join(os.TempDir(), "anytype_florence2.py")
+	if err := os.WriteFile(scriptPath, []byte(florenceScript), 0o644); err != nil {
+		return "", fmt.Errorf("write florence script: %w", err)
+	}
+	return scriptPath, nil
+}
+
+// FlorenceServer manages a long-running Python Florence-2 captioning process.
+// The model is loaded once at startup; subsequent DescribeImage calls are fast.
+type FlorenceServer struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *bufio.Scanner
+}
+
+// StartFlorenceServer launches the Florence-2 process and blocks until the model
+// is fully loaded (signalled by "READY" on stdout). On the first run the model
+// weights are downloaded from HuggingFace Hub; download progress appears on stderr.
+func StartFlorenceServer(python, scriptPath, task, modelId string) (*FlorenceServer, error) {
+	cmd := exec.Command(python, scriptPath, task, modelId)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("florence stdin pipe: %w", err)
+	}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("florence stdout pipe: %w", err)
+	}
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start florence process: %w", err)
+	}
+
+	scanner := bufio.NewScanner(stdoutPipe)
+	for scanner.Scan() {
+		if scanner.Text() == "READY" {
+			return &FlorenceServer{cmd: cmd, stdin: stdin, stdout: scanner}, nil
+		}
+	}
+	_ = cmd.Wait()
+	return nil, fmt.Errorf("florence process exited before the model was ready")
+}
+
+// DescribeImage sends an image path to the running Florence-2 process and returns
+// the generated natural-language description.
+func (f *FlorenceServer) DescribeImage(imagePath string) (string, error) {
+	if _, err := fmt.Fprintln(f.stdin, imagePath); err != nil {
+		return "", fmt.Errorf("send image path to florence: %w", err)
+	}
+	if !f.stdout.Scan() {
+		if err := f.stdout.Err(); err != nil {
+			return "", fmt.Errorf("read florence response: %w", err)
+		}
+		return "", fmt.Errorf("florence process closed unexpectedly")
+	}
+	line := f.stdout.Text()
+	switch {
+	case strings.HasPrefix(line, "OK:"):
+		return strings.TrimPrefix(line, "OK:"), nil
+	case strings.HasPrefix(line, "ERR:"):
+		return "", fmt.Errorf("florence: %s", strings.TrimPrefix(line, "ERR:"))
+	default:
+		return "", fmt.Errorf("unexpected florence output: %s", line)
+	}
+}
+
+// Close shuts down the Florence-2 process gracefully by closing its stdin.
+func (f *FlorenceServer) Close() error {
+	_ = f.stdin.Close()
+	return f.cmd.Wait()
+}

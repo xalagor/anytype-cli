@@ -22,12 +22,17 @@ func NewImagesCmd() *cobra.Command {
 		spaceId      string
 		taggerFlag   bool
 		namesFlag    bool
+		florenceFlag bool
 		relationName string
 		pythonExe    string
 		genThresh    float64
 		charThresh   float64
 		dryRun       bool
 		limit        int
+		// Florence-specific flags
+		florenceRelation string
+		florenceTask     string
+		florenceModel    string
 	)
 
 	cmd := &cobra.Command{
@@ -35,11 +40,17 @@ func NewImagesCmd() *cobra.Command {
 		Short: "Doctor commands for image objects",
 		Long:  "Run diagnostics and enrichment operations on image objects in your Anytype spaces",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !taggerFlag && !namesFlag {
+			if !taggerFlag && !namesFlag && !florenceFlag {
 				return cmd.Help()
+			}
+			if taggerFlag && florenceFlag {
+				return fmt.Errorf("--tagger and --florence are mutually exclusive")
 			}
 			if namesFlag {
 				return runNames(spaceId, dryRun, limit)
+			}
+			if florenceFlag {
+				return runFlorence(spaceId, florenceRelation, pythonExe, florenceTask, florenceModel, dryRun, limit)
 			}
 			return runTagger(spaceId, relationName, pythonExe, genThresh, charThresh, dryRun, limit)
 		},
@@ -47,13 +58,17 @@ func NewImagesCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&taggerFlag, "tagger", false, "Tag images with WD EVA02 large v3 tagger (requires Python + onnxruntime + Pillow + huggingface_hub)")
 	cmd.Flags().BoolVar(&namesFlag, "names", false, "Restore Source | URL for images whose name matches pinterest_<id>")
+	cmd.Flags().BoolVar(&florenceFlag, "florence", false, "Generate image descriptions with Microsoft Florence-2 (requires Python + torch + transformers + Pillow + einops)")
 	cmd.Flags().StringVar(&spaceId, "space", "", "Space `id` to process (default: all spaces)")
-	cmd.Flags().StringVar(&relationName, "relation", "WD14 Tagger", "Display name of the relation to store tags in")
-	cmd.Flags().StringVar(&pythonExe, "python", "python3", "Python executable to use for the tagger")
+	cmd.Flags().StringVar(&relationName, "relation", "WD14 Tagger", "Display name of the relation to store tags in (used with --tagger)")
+	cmd.Flags().StringVar(&pythonExe, "python", "python3", "Python executable to use")
 	cmd.Flags().Float64Var(&genThresh, "threshold", 0.35, "General tag confidence threshold (0–1)")
 	cmd.Flags().Float64Var(&charThresh, "char-threshold", 0.85, "Character tag confidence threshold (0–1)")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print tags without writing them to Anytype")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print results without writing them to Anytype")
 	cmd.Flags().IntVar(&limit, "limit", 0, "Max number of images to process (0 = no limit, useful for testing)")
+	cmd.Flags().StringVar(&florenceRelation, "florence-relation", "Florence 2 Caption", "Display name of the relation to store Florence-2 descriptions in")
+	cmd.Flags().StringVar(&florenceTask, "florence-task", "detailed", "Florence-2 captioning task: caption | detailed | more-detailed")
+	cmd.Flags().StringVar(&florenceModel, "florence-model", "microsoft/Florence-2-base", "HuggingFace model ID for Florence-2 (e.g. microsoft/Florence-2-large)")
 
 	return cmd
 }
@@ -312,6 +327,151 @@ func runNames(spaceId string, dryRun bool, limit int) error {
 		output.Info("Dry run: %d/%d images would be restored, %d skipped", totalRestored, totalFound, totalSkipped)
 	} else {
 		output.Info("Done: %d restored, %d skipped (of %d found)", totalRestored, totalSkipped, totalFound)
+	}
+	return nil
+}
+
+func runFlorence(spaceId, relationName, pythonExe, task, modelId string, dryRun bool, limit int) error {
+	var spaceIds []string
+	if spaceId != "" {
+		spaceIds = []string{spaceId}
+	} else {
+		spaces, err := core.ListSpaces()
+		if err != nil {
+			return output.Error("Failed to list spaces: %w", err)
+		}
+		for _, s := range spaces {
+			spaceIds = append(spaceIds, s.SpaceId)
+		}
+	}
+
+	if len(spaceIds) == 0 {
+		output.Info("No spaces found")
+		return nil
+	}
+
+	pythonExe, err := core.ResolvePython(pythonExe)
+	if err != nil {
+		return output.Error("%v", err)
+	}
+
+	scriptPath, err := core.WriteFlorenceScript()
+	if err != nil {
+		return output.Error("Failed to prepare Florence script: %w", err)
+	}
+
+	tempDir, err := os.MkdirTemp("", "anytype-florence-*")
+	if err != nil {
+		return output.Error("Failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	gatewayURL, err := core.GetGatewayURL(spaceIds[0])
+	if err != nil {
+		return output.Error("Failed to get gateway URL: %w", err)
+	}
+
+	output.Info("Loading Florence-2 model %s (downloading on first run — this may take a few minutes)…", modelId)
+	florence, err := core.StartFlorenceServer(pythonExe, scriptPath, task, modelId)
+	if err != nil {
+		return output.Error("Failed to start Florence-2: %w", err)
+	}
+	defer florence.Close()
+	output.Info("Florence-2 ready.")
+
+	var totalImages, totalDescribed, totalSkipped int
+	done := false
+
+	for _, sid := range spaceIds {
+		if done {
+			break
+		}
+
+		relKey, err := core.FindRelationKeyByName(sid, relationName)
+		if err != nil {
+			output.Warning("Space %s: %v — skipping", sid, err)
+			continue
+		}
+
+		images, err := core.FindUntaggedImages(sid, relKey)
+		if err != nil {
+			output.Warning("Space %s: failed to find images: %v", sid, err)
+			continue
+		}
+
+		if len(images) == 0 {
+			output.Info("Space %s: all images already have a description", sid)
+			continue
+		}
+
+		if limit > 0 {
+			remaining := limit - totalImages
+			if remaining <= 0 {
+				done = true
+				break
+			}
+			if len(images) > remaining {
+				images = images[:remaining]
+			}
+		}
+
+		output.Info("Space %s: describing %d image(s) (relation key: %s)", sid, len(images), relKey)
+		totalImages += len(images)
+
+		for _, img := range images {
+			label := img.Name
+			if label == "" {
+				label = img.ObjectId
+			}
+			link := objectDeepLink(img.ObjectId, sid)
+
+			localPath, err := core.DownloadImageViaGateway(img.ObjectId, tempDir, gatewayURL)
+			if err != nil {
+				if errors.Is(err, core.ErrImageFormatNotSupported) {
+					output.Info("  skip %s (format not supported by Florence-2)\n    %s", label, link)
+				} else {
+					output.Warning("  skip %s\n    %s\n    %v", label, link, err)
+				}
+				totalSkipped++
+				continue
+			}
+
+			description, err := florence.DescribeImage(localPath)
+			os.Remove(localPath)
+			if err != nil {
+				output.Warning("  skip %s\n    %s\n    %v", label, link, err)
+				totalSkipped++
+				continue
+			}
+
+			if description == "" {
+				output.Warning("  skip %s (no description produced)\n    %s", label, link)
+				totalSkipped++
+				continue
+			}
+
+			if dryRun {
+				output.Info("  [dry-run] %s\n    %s\n    -> %s", label, link, truncate(description, 120))
+				totalDescribed++
+				continue
+			}
+
+			if err := core.SetObjectTextRelation(img.ObjectId, relKey, description); err != nil {
+				output.Warning("  skip %s\n    %s\n    failed to save: %v", label, link, err)
+				totalSkipped++
+				continue
+			}
+
+			output.Success("  %s\n    %s\n    %s", label, link, truncate(description, 120))
+			totalDescribed++
+		}
+	}
+
+	fmt.Println()
+	if dryRun {
+		output.Info("Dry run: %d/%d images would be described, %d skipped", totalDescribed, totalImages, totalSkipped)
+	} else {
+		output.Info("Done: %d described, %d skipped (of %d found)", totalDescribed, totalSkipped, totalImages)
 	}
 	return nil
 }
